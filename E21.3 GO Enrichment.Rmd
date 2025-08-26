@@ -1,0 +1,315 @@
+---
+title: "E21.3 GO for WW"
+author: "Chandler Sutherland"
+date: "2025-08-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning=FALSE)
+```
+
+```{r}
+library(ggplot2)
+library(ggsignif)
+library(ggpubr)
+library(ggbeeswarm)
+require(tidyverse)
+library(openxlsx)
+library(patchwork)
+library(ggExtra)
+library(scales)
+library(topGO)
+```
+
+Copyright (c) Chandler Sutherland Email: [chandlersutherland\@berkeley.edu](mailto:chandlersutherland@berkeley.edu){.email}
+
+Purpose: GO/Pfam enrichment analysis for WW promoter paper. 
+
+Load WW's data and use her code to filter in the same way to pangenes > size 5 and mean middle leaf TPM > 1. 
+```{r}
+# Adapted WW's code for filtering 
+
+#load files (changed to mine)
+pangene_alltissue_mean=read.csv(file="data/pangene_alltissue_mean_toChandler.csv")
+pangene_alltissue_adjCV=read.csv(file="data/pangene_alltissue_adjCV.csv")
+
+#filter to pangenes >5 and TPM >= 1
+pangene_alltissue_mean_filter=pangene_alltissue_mean %>% 
+  subset(select=c("Pangene","Size","Similarity","middle")) %>% 
+  filter(Size>5) %>% 
+  filter(middle>=1)
+
+#filter CV to these expressed and reasonably sized pangenes 
+pangene_alltissue_adjCV_filter=pangene_alltissue_adjCV %>% 
+  subset(select=c("Pangene","Size","Similarity","middle")) %>% 
+  filter(Pangene %in% pangene_alltissue_mean_filter$Pangene) %>%
+  mutate(middle=as.numeric(middle))
+
+#plot as sanity check 
+ggplot(data=pangene_alltissue_adjCV_filter, aes(x=as.numeric(middle))) +
+  geom_density()+
+  labs(x="Variability[log10(CV^2)]" )+
+  xlim(-2,2)+
+  theme_classic()
+
+#scatter plot
+pangene_CV_sim=merge(pangene_alltissue_adjCV[,c(1:3,5)],pangene_alltissue_mean[,c(1,5)],by="Pangene")
+colnames(pangene_CV_sim)=c("Pangene","Size","Similarity","Adjusted_CV","Mean")
+pangene_CV_sim$Adjusted_CV=as.numeric(pangene_CV_sim$Adjusted_CV)
+quantile(pangene_CV_sim$Similarity,probs = c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1))
+quantile(pangene_CV_sim$Adjusted_CV,probs = c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1),na.rm = TRUE)
+
+#criteria for pangene selection for top % 
+pangene_filter=pangene_CV_sim[pangene_CV_sim$Mean>=1&pangene_CV_sim$Size>5,]
+set1=pangene_filter %>% filter(Similarity< 600 & Adjusted_CV>0.37) #20% and 20%
+set2=pangene_filter %>% filter(Similarity< 667 & Adjusted_CV>0.3)  #25% and 25%
+set3=pangene_filter %>% filter(Similarity< 746 & Adjusted_CV>0.23)  #30% and 30%
+
+#plot sanity check 
+ggplot() + 
+  geom_point(data=pangene_filter,aes(x=log2(Similarity), y=Adjusted_CV),color="darkgrey",size=0.5, shape=20) +
+  geom_point(data=set3,aes(x=log2(Similarity), y=Adjusted_CV),color="pink",size=0.5, shape=20) +
+  geom_point(data=set2,aes(x=log2(Similarity), y=Adjusted_CV),color="red",size=0.5, shape=20) +
+  geom_point(data=set1,aes(x=log2(Similarity), y=Adjusted_CV),color="darkred",size=0.5, shape=20) +
+  #geom_smooth(data=pangene_filter,aes(x=log2(Similarity), y=Adjusted_CV),method=lm,linetype="solid", color="#AFD9FD",size=0.5,se=FALSE) +. #add a regression line
+  geom_vline(xintercept = 9.54, linetype = "dashed", color = "pink") +
+  geom_hline(yintercept = 0.23, linetype = "dashed", color = "pink") +
+  geom_vline(xintercept = 9.38, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0.3, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = 9.22, linetype = "dashed", color = "darkred") +
+  geom_hline(yintercept = 0.37, linetype = "dashed", color = "darkred") +
+  xlab("log2(Similarity)") + ylab("Variability[log10(CV^2)]") + ylim(-1.5,1.5)+
+  theme_classic()
+
+#read in pangene membership info 
+pan_gene <- read_tsv('data/pan-zea.v3.pan-genes_table_NAM.txt')
+```
+
+## GO Enrichment 
+
+GO enrichment on: 
+1. genes with highly variable transcription 
+2. genes with both highly variable transcription AND promoter sequence 
+
+Methods: 
+"The B73 v5 
+1. highly variable expression
+```{r}
+#set limits of distribution and extremes
+q <- quantile(pangene_alltissue_adjCV_filter$middle, probs=c(0.05, 0.95))
+
+pangene_alltissue_adjCV_filter %>%
+  ggplot(aes(x=middle))+
+  geom_density()+
+  geom_vline(xintercept=q[[1]], linetype=2, color='red')+
+  geom_vline(xintercept=q[[2]], linetype=2, color='red')+
+  labs(x="Variability[log10(CV^2)]" )+
+  xlim(-2, 2)+
+  theme_classic()
+
+bottom_5 <- pangene_alltissue_adjCV_filter %>% filter(middle<q[[1]]) %>% pull(Pangene)
+top_5 <- pangene_alltissue_adjCV_filter %>% filter(middle>q[[2]]) %>% pull(Pangene)
+```
+
+```{r}
+top_pan <- pan_gene %>% filter(Pangene %in% top_5)
+bottom_pan <- pan_gene %>% filter(Pangene %in% bottom_5) 
+
+top_pan_b73 <- top_pan %>% 
+  pull(Zm00001eb) %>% 
+  unique() %>% 
+  str_split(',') %>% 
+  unlist() %>% 
+  str_split_i('_', 1) %>%
+  unique() %>%
+  unlist()
+
+write(top_pan_b73, file = "output/top_pan_b73_test.txt", ncolumns = 1)
+#capture.output(top_pan_b73, file = "output/top_pan_b73_test.txt")
+
+bottom_pan_b73 <- bottom_pan %>% 
+  pull(Zm00001eb) %>% 
+  unique() %>% 
+  str_split(',') %>% 
+  unlist() %>% 
+  str_split_i('_', 1) %>%
+  unique() %>%
+  unlist()
+
+write(bottom_pan_b73, file = "output/bottom_pan_b73_test.txt", ncolumns = 1)
+
+top_pan_b73_reference <- pan_gene %>% 
+  #filter(!Pangene %in% top_5) %>% #need everything, not just non-top 5 
+  pull(Zm00001eb) %>% 
+  unique() %>% 
+  str_split(',') %>% 
+  unlist() %>% 
+  str_split_i('_', 1) %>%
+  unique()
+write(top_pan_b73_reference, file = "output/top_pan_b73_reference.txt", ncolumns = 1)
+#capture.output(top_pan_b73_reference, file = "output/top_pan_b73_reference.txt")
+```
+
+Start with geneontology.org with availabel B73 gene IDs because it has the NAM version of B73 downloaded
+
+Methods
+All query genes are converted to ENSEMBL gene IDs or STRING-db protein IDs, as our gene ID mapping and pathway data primarily come from these sources. For model organisms, we manually compile extensive pathway lists from various public databases.
+
+P-values are calculated using the hypergeometric test, and false discovery rates (FDRs) are computed via the Benjamini-Hochberg method to correct for multiple testing. Fold enrichment is defined as the percentage of genes in your list that are in a pathway divided by the corresponding percentage in the background genes. While FDR measures statistical significance, fold enrichment indicates effect size.
+
+We recommend that users provide their own list of background genes, which could include all genes detected in an experiment, such as genes with probes on a DNA microarray, passed a minimal filter in RNA-seq analysis, or detected in a proteomics experiment. If no background genes are uploaded, the default is to use all protein-coding genes. Alternatively, you may select the option 'Use pathway DB for gene counts,' which calculates the background based on the total number of unique genes in the chosen pathway database, limited between 5,000 and 30,000 genes. When this option is selected, any genes in the user's original list that are not in the pathway database are excluded.
+
+Only pathways within specified size limits, as defined by the 'Pathway size: (Min, Max)' settings, are considered. Results for smaller pathways can be noisy, but some pathways or GO terms have only a few genes. After analysis, pathways are filtered by a user-defined FDR cutoff. Significant pathways are then sorted in different ways, and only the top-ranked are shown in the table above. By default, 'Select by FDR, then by Fold Enrichment' is used, where pathways are first filtered and sorted by FDR, and then the top 20 are sorted by fold enrichment. In other words, the default setting shows the top 20 most significant pathways ranked by fold enrichment. When the 'Sort by average ranks (FDR & fold enrichment)' option is selected, pathways are sorted by the average of their ranks based on both FDR and fold enrichment. When 'Sort by FDR' is selected, pathways are ranked by FDR and only the top 20 are shown. The 'Remove redundancy' option eliminates similar pathways that share 95% of their genes and 50% of the words in their names, representing them with the pathway that has the highest significance.
+
+```{r}
+load_shiny_go_csv <- function(file_path){
+  df <- read_csv(file_path) %>% 
+    separate(Pathway, into=c('GO ID', 'definition'), sep=' ', extra='merge') %>% 
+    mutate(log10_FDR=-log10(`Enrichment FDR`))
+  return(df)
+}
+
+plot_shiny_go <- function(df){
+  ggplot(df)+
+    geom_point(aes(x=`Fold Enrichment`, 
+                 y=reorder(definition, `Fold Enrichment`), 
+                 size=nGenes, 
+                 color=log10_FDR))+
+    geom_segment(aes(x=0, xend=`Fold Enrichment`, 
+                   y=reorder(definition, `Fold Enrichment`), 
+                   yend=reorder(definition, `Fold Enrichment`), 
+                   color=log10_FDR))+
+  scale_colour_gradient(low = "blue", high = "red") +
+  xlab("Fold Enrichment") + 
+  ylab('')+ 
+  labs(color = "-Log10 FDR", size = "Number of genes \nwith annotation")+
+  theme(axis.text=element_text(size=6), axis.title=element_text(size=8), legend.title=element_text(size=8))+
+  theme_classic()
+}
+
+top_pan_b73 <- load_shiny_go_csv('shiny_go_result/top_pan_b73.csv') 
+top_pan_b73 %>% plot_shiny_go() + ggtitle('Top 5% of CV, GO Biological Processes')
+
+bottom_pan_b73 <- load_shiny_go_csv('shiny_go_result/bottom_pan_b73.csv') 
+bottom_pan_b73 %>% plot_shiny_go() + ggtitle('Bottom 5% of CV, GO Biological Processes')
+```
+
+## Pannzer Annotation from Maize GDB 
+
+"It is a parseable file, which uses a context sensitive grammar, as explained below. The file has six tab-separated columns labelled qpid, type, score, PPV, id and desc. 
+- The first column (qpid) always contains the identifier of the query sequence. 
+- The second column (type) can take the following values, and the score, PPV, id and desc columns change meaning accordingly:
+    - original_DE: score is euk for eukaryotic query species and bac otherwise; 
+    - id is the form factor of desc, the description from the input FASTA file 
+    - qseq: desc is the amino acid sequence of the query protein 
+    - DE: score is the prediction score; 
+    - PPV is the normalized prediction score between 0 and 1; 
+    - id is the form factor of desc, the predicted description 
+    - GN: desc is the gene symbol. A gene symbol is predicted if its support is greater than half in the list of homologs ontology_predictor where ontology is one of MF (molecular function), BP (biological process), CC (cellular component) and predictor is one of RM3, ARGOT, HYGE or JAC. 
+    - score is the prediction score, 
+    - PPV is the normalized prediction score between 0 and 1, 
+    - id is the GO identifier and desc is the short description of the GO class EC_predictor: 
+    - desc is the GO class that has the highest PPV and has a link in ec2go, 
+    - id is the EC class KEGG_predictor: 
+    - desc is the GO class that has the highest PPV and has a link in kegg2go, 
+    - id is the KEGG pathway identifier
+    
+  Clean up and follow Pierre: 
+"All proteins were annotated for GO terms using the PANNZER2 (Törönen et al. 2018) webserver and command line software SANSPANZ version 3 in October 2022. Only annotations with a positive predictive value greater than 0.6 and an ARGOT rank of 1 were kept. All GO terms assigned to genes within an orthogroup were then transferred to their orthogroup. GO term enrichment analysis was then performed using TopGO (Alexa and Rahnenfuhrer 2023) version 2.36.0 and enrichment was calculated using the Fisher's exact test and the “weight” algorithm. Only GO terms that were assigned to 3 or more lineage-differentiating PAV orthogroups and with enrichment P-values less than 0.05 were reported."
+```{r}
+#read in B73 annotation 
+B73_GO <- read_tsv('//wsl.localhost//Ubuntu//home//chandlersutherland//e21_scratch//B73_GO.out') %>% 
+  filter(ARGOT_PPV > 0.6) %>% #filter low confidence predictions 
+  filter(ARGOT_rank==1)%>%
+  mutate(goid=paste0('GO:', goid))
+
+#75k entries in the filtered annotation 
+B73_GO %>% pull(qpid) %>% unique() %>% length()
+#43k unique genes 
+
+#add GO annotation to the pangenes of genes that pass the CV filters 
+pangene_b73_go_annotated <- pangene_alltissue_adjCV_filter %>% #15k pangenes 
+  merge(pan_gene) %>% #add pangene members 
+  mutate(Zm00001eb=str_replace_all(Zm00001eb, '_T', '_P')) %>% #start with B73, expand to all genes 
+  subset(select=c(Pangene, Zm00001eb)) %>%
+  separate_rows(Zm00001eb, sep=',') %>%
+  filter(Zm00001eb != 'NONE') %>% #will go back and add these 
+  merge(B73_GO, by.x='Zm00001eb', by.y='qpid') %>% #combine with B73_GO terms 
+  subset(select=c(Pangene, ontology, goid, desc)) %>% #keep important and unique(should only be one go term per pangene)
+  unique()
+
+#convert to topGO list 
+go_df <- aggregate(goid ~ Pangene, data=pangene_b73_go_annotated, FUN=c)
+pangene_go_list <- structure(go_df$goid, .Names=go_df$Pangene)
+```
+Get the top 5% of CV values of middle 
+```{r}
+#mark the top 5% 
+q <- quantile(pangene_alltissue_adjCV_filter$middle, probs=c(0.05, 0.95))
+
+#get a B73 list of top 5 or not 
+top5_df <- pangene_alltissue_adjCV_filter %>% mutate(top_5=case_when(middle>q[[2]] ~ 'yes', 
+                                                          .default='no')) 
+#transform to list format for topgo 
+pangene_list <- factor(as.integer(top5_df$top_5=='yes'))
+names(pangene_list) <- top5_df$Pangene
+```
+```{r}
+
+run_topGO <- function(pangene_list, ontology, pangene_go_list){
+  topGO_data <- new("topGOdata", 
+                  ontology=ontology, 
+                  allGenes=pangene_list, #yes or no gene list 
+                  annot=annFUN.gene2GO, 
+                  gene2GO=pangene_go_list)
+  fishers_result <- runTest(topGO_data, algorithm='elim', statistic='fisher')
+
+  fishers_table <- GenTable(topGO_data, Fishers=fishers_result, useLevels=T) %>%
+    mutate(Fishers=as.numeric(Fishers)) %>%
+    filter(Fishers < 0.05) %>% # p value > 0.05
+    filter(Significant >= 3) %>% # at least 3 pangenes are within the GO Term 
+    mutate(observed_expected_ratio=Significant/Expected)
+  
+  return(fishers_table)
+}
+
+plot_topGO <- function(fishers_table, ontology){
+  p1 <- fishers_table %>%
+    ggplot(aes(x=observed_expected_ratio, y=factor(reorder(Term, observed_expected_ratio))))+
+    geom_point(aes(color=-log10(Fishers), size=Annotated))+
+    scale_color_gradient(low='blue', high='red')+
+    xlab("Observed count over expected count")+
+    labs(color = "-Log10 p-value", 
+         size = "Number of genes \nwith annotation", 
+         title=paste('GO Analysis', ontology, 'top 5% CV'))+
+    geom_rect(mapping=aes(xmin=-Inf, xmax=1, ymin=-Inf, ymax=Inf), color="grey", alpha=0.01) +
+    ylab('')+
+    theme_classic()
+  return(p1)
+}
+  
+
+p_bp <- run_topGO(pangene_list, 'BP', pangene_go_list) %>% plot_topGO('BP')
+p_mf <- run_topGO(pangene_list, 'MF', pangene_go_list) %>% plot_topGO('MF')
+
+p_bp / p_mf     
+
+#fishers_table %>% 
+#  ggplot(aes(x=reorder(Term, -log10(Fishers)), y=-log10(Fishers), size=Significant, color=-log10(Fishers)))+
+#  geom_point()+
+#    scale_color_continuous(low = 'royalblue', high = 'tomato') +
+#    xlab('') + ylab('-log10 (p value)') +
+#    labs(title = paste0('GO Analysis (MF) Top 5% CV')) +
+#    geom_hline(
+#      yintercept = c(-log10(0.05), -log10(0.01), -log10(0.001)),
+#      linetype = c("dotted", "dotted", "dotted"),
+#      colour = c("black", "black", "black"),
+#      size = c(1, 1, 1)
+#    ) +
+#    theme_bw(base_size = 12) +
+#    coord_flip()
+```
+Similar categories popping up as in the other one. Cool. 
+
+
